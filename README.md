@@ -1,3 +1,10 @@
+# 國立高雄科技大學 電子工程系 研究所專案報告
+* **指導教授：** 陳朝烈 教授
+* **開發環境：** Windows / VS Code
+* **對應題目：** 題目一 (電腦視覺) - 基於多幀共識之高效率全自動硬幣辨識系統
+
+---
+
 # 基於多幀共識與幾何不變性之高效率全自動硬幣辨識系統
 ### High-Efficiency Automatic Coin Recognition System with Temporal Lifecycle Locking
 
@@ -5,7 +12,7 @@
 
 ---
 
-## 🚀 核心技術亮點 (Key Features)
+## 核心技術亮點 (Key Features)
 
 * **全畫面不分區辨識 (No Region Splitting)**：摒棄傳統寫死固定座標或人為劃分 ROI 遮罩的作法，演算法具備 100% 全畫面自主動態偵測能力。
 * **幾何魯棒性 (Geometric Robustness)**：有效抵抗環境光影變化，調校 `dp=1.2` 參數空間網格，針對手機斜拍引起的「透視橢圓化畸變」與畫面邊緣的「幾何資訊截斷」進行數學容錯。
@@ -15,7 +22,7 @@
 
 ---
 
-## 🛠️ 演算法技術核心流程 (System Architecture)
+## 演算法技術核心流程 (System Architecture)
 
 本系統的處理架構分為四大核心層級：
 
@@ -61,7 +68,7 @@
 
 ---
 
-## 💻 快速開始 (Getting Started)
+## 快速開始 (Getting Started)
 
 ### 1. 環境需求 (Prerequisites)
 
@@ -98,7 +105,7 @@ python coin_detect.py
 
 ---
 
-## 📊 核心程式碼解析 (Code Snippet)
+## 核心程式碼解析 (Code Snippet)
 
 ```python
 # 1. 前端非線性空間預處理
@@ -126,7 +133,7 @@ if count >= 16: # 必須連續通過 16 幀的時間共識考驗
 
 ---
 
-## 📚 學術參考文獻 (References)
+## 學術參考文獻 (References)
 
 1. **繆紹綱（譯）（2019）。《數位影像處理》（第四版）。台北市：東華書局。(Gonzalez, R. C., & Woods, R. E. 原著)。**
 * *支撐論點*：非線性空間濾波器原理，證實中值模糊在抑制高頻字體噪訊且不破壞硬幣幾何邊緣的工程合理性。
