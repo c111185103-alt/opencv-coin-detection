@@ -80,7 +80,7 @@
 | `dp` | `1.0` | 累加器解析度倒數。若傾斜拍攝角大於 30° 導致橢圓畸變嚴重，可調高至 `1.4` 模糊投票誤差。 |
 | `param1` | `130` | 內建 Canny 邊緣檢測的高閥值，用以過濾桌面刮痕等弱邊緣。 |
 | `param2` | `32` | 圓心累積投票門檻。調低至 32 可包容斜拍橢圓，缺點是雜訊感度會同步上升。 |
-| `LOCK_TIME_THRESH` | `0.5` | 死鎖時間門檻（秒）。越過此防線之物件將啟動跨幀共識死鎖機制。 |
+| `LOCK_TIME_THRESH` | `0.5` | 固定時間門檻（秒）。越過此防線之物件將啟動跨幀共識固定機制。 |
 
 ---
 
@@ -125,7 +125,215 @@ tracked_coins = sorted(tracked_coins, key=lambda x: x['age'], reverse=True)
 1. **背景優化**：更換檢測平台底色，勿使用會產生鏡面反射的白色背景或高頻紋理表面，建議改用**霧面（不反光）深黑色或墨綠色耐磨軟墊**。深色背景能使銀色硬幣的階躍邊緣（Gradient）在任何光線下皆保持極高對比度。
 2. **光源配置**：避免光源從鏡頭正上方直射硬幣。應採用工業級環形無影光源（Ring Light）或帶有擴散板的斜角側光源，從根本消滅眩光。
 
+---
+## 完整程式 (Complete code)
 ```
-***
+import cv2
+import numpy as np
+import time
+import sys
+
+def coin_detection(video_path, output_path):
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"無法讀取影片，請檢查路徑：{video_path}")
+        return
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0: fps = 30.0  # 安全防護，若抓不到 FPS 則預設為 30
+    
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) 
+    
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
+
+    # ==========================================
+    # 計算 0.5 秒對應的影格數門檻
+    # ==========================================
+    LOCK_TIME_THRESH = 0.5 # 設定鎖定時間為 0.5 秒
+    frames_to_lock = int(LOCK_TIME_THRESH * fps)
+
+    print(f"影片總幀數: {total_frames} 幀 | 原始解析度: {w}x{h} | 影片 FPS: {fps:.2f}")
+    print("-" * 80)
+
+    TARGET_WIDTH = 800
+    scale_factor = TARGET_WIDTH / w
+    target_h = int(h * scale_factor)
+
+    # 初始化時間序列追蹤器
+    tracked_coins = []  # 儲存結構: {'orig_x': x, 'orig_y': y, 'orig_r': r, 'age': 連續格數, 'missed': 消失格數}
+    MATCH_DIST_THRESH = 60  # 判定為同一個硬幣的移動追蹤距離（像素）
+    OVERLAP_THRESH_RATIO = 0.7  # 重疊度門檻
+    MAX_MISSED_FRAMES = 3  # 未滿 0.5 秒的新候選框，允許短暫消失的格數
+
+    global_start_time = time.time()
+    frame_count = 0
+
+    while True:
+        start_time = time.time()
+        ret, frame = cap.read()
+        if not ret: break
+        
+        frame_count += 1 
+
+        # 1. 影像縮放與灰階化
+        frame_small = cv2.resize(frame, (TARGET_WIDTH, target_h))
+        gray = cv2.cvtColor(frame_small, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        gray = clahe.apply(gray)
+        
+        # 2. 中值濾波
+        blurred = cv2.medianBlur(gray, 23)
+        
+        # 3. 霍夫圓轉換
+        circles = cv2.HoughCircles(
+            blurred, 
+            cv2.HOUGH_GRADIENT, 
+            dp=1, 
+            minDist=60,        
+            param1=130,        
+            param2=32,         
+            minRadius=28,      
+            maxRadius=110       
+        )
+
+        # 提取當前影格轉換回原始解析度的所有觀測圓形
+        current_detections = []
+        if circles is not None:
+            circles = np.round(circles[0, :]).astype("int")
+            for (cx, cy, r) in circles:
+                orig_x = int(cx / scale_factor)
+                orig_y = int(cy / scale_factor)
+                orig_r = int(r / scale_factor)
+                current_detections.append((orig_x, orig_y, orig_r))
+
+        # ==========================================
+        # 時間序列追蹤與重複框過濾邏輯
+        # ==========================================
+        matched_detection_indices = set()
+
+        # 步驟 A: 將當前偵測到的圓，與上一格已存在的硬幣進行匹配
+        for coin in tracked_coins:
+            best_dist = float('inf')
+            best_idx = -1
+            for idx, (det_x, det_y, det_r) in enumerate(current_detections):
+                if idx in matched_detection_indices:
+                    continue
+                # 計算圓心距離
+                dist = np.sqrt((coin['orig_x'] - det_x)**2 + (coin['orig_y'] - det_y)**2)
+                if dist < MATCH_DIST_THRESH and dist < best_dist:
+                    best_dist = dist
+                    best_idx = idx
+            
+            if best_idx != -1:
+                # 匹配成功，更新位置、壽命增長、重置消失計數
+                det_x, det_y, det_r = current_detections[best_idx]
+                coin['orig_x'] = det_x
+                coin['orig_y'] = det_y
+                coin['orig_r'] = det_r
+                coin['age'] += 1
+                coin['missed'] = 0
+                matched_detection_indices.add(best_idx)
+            else:
+                # 這格沒匹配到，算請假一次
+                coin['missed'] += 1
+
+        # ==========================================
+        # 判斷是否永久保留紅框
+        # ==========================================
+        # 條件：消失格數在容許範圍內(新候選框) OR 存活格數已經超過 0.5 秒
+        tracked_coins = [
+            c for c in tracked_coins 
+            if c['missed'] <= MAX_MISSED_FRAMES or c['age'] >= frames_to_lock
+        ]
+
+        # 步驟 B: 沒被匹配到的全新圓圈，作為新候選框加入追蹤（初始壽命為 1）
+        for idx, (det_x, det_y, det_r) in enumerate(current_detections):
+            if idx not in matched_detection_indices:
+                tracked_coins.append({
+                    'orig_x': det_x,
+                    'orig_y': det_y,
+                    'orig_r': det_r,
+                    'age': 1,
+                    'missed': 0
+                })
+
+        # 步驟 C: 依據時間長短（age）由大到小排序
+        tracked_coins = sorted(tracked_coins, key=lambda x: x['age'], reverse=True)
+
+        # 步驟 D: 疊在一起時過濾掉時間短的框
+        kept_coins = []
+        for coin in tracked_coins:
+            is_overlapping = False
+            for kept in kept_coins:
+                dist = np.sqrt((coin['orig_x'] - kept['orig_x'])**2 + (coin['orig_y'] - kept['orig_y'])**2)
+                if dist < (coin['orig_r'] + kept['orig_r']) * OVERLAP_THRESH_RATIO:
+                    is_overlapping = True
+                    break # 疊在一起了，直接捨棄短命框
+            
+            if not is_overlapping:
+                kept_coins.append(coin)
+        
+        tracked_coins = kept_coins
+        coin_count = len(tracked_coins) # 最終真正保留下來的硬幣數量
+
+        # ==========================================
+        # 繪製最終過濾與鎖定後的唯一紅色物件框與座標
+        # ==========================================
+        for coin in tracked_coins:
+            orig_x, orig_y, orig_r = coin['orig_x'], coin['orig_y'], coin['orig_r']
+            top_left = (orig_x - orig_r, orig_y - orig_r)
+            bottom_right = (orig_x + orig_r, orig_y + orig_r)
+            
+            # 如果這個框已經達到鎖定標準，可以選擇換顏色（例如換成黃色或維持紅色，這裡依要求維持紅框）
+            cv2.rectangle(frame, top_left, bottom_right, (0, 0, 255), 3)
+            
+            # 標註座標
+            text = f"({orig_x}, {orig_y})"
+            cv2.putText(frame, text, (top_left[0], top_left[1] - 15), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 3)
+        
+        # 動態計算時間與速率
+        process_time = time.time() - start_time                
+        elapsed_time = time.time() - global_start_time         
+        avg_time_per_frame = elapsed_time / frame_count        
+        remaining_frames = total_frames - frame_count          
+        remaining_time = remaining_frames * avg_time_per_frame 
+
+        rem_min = int(remaining_time // 60)
+        rem_sec = int(remaining_time % 60)
+
+        # 寫入影片標籤
+        remaining_text = f"Remaining: {rem_min:02d}m {rem_sec:02d}s"
+        cv2.putText(frame, f"FPS (Avg): {1/avg_time_per_frame:.1f}", (30, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 0, 0), 3)
+        cv2.putText(frame, remaining_text, (30, 120), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
+        cv2.putText(frame, f"Time: {process_time:.4f}s", (30, 170), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 0, 0), 3)
+
+        out.write(frame)
+        
+        # 將過濾後的精準數據同步刷新至終端機
+        progress = (frame_count / total_frames) * 100
+        sys.stdout.write(
+            f"\r[進度]: {frame_count}/{total_frames} ({progress:.1f}%) | "
+            f"速度: {process_time:.4f}s/幀 ({1/avg_time_per_frame:.1f} FPS) | "
+            f"穩定偵測硬幣: {coin_count} 枚 | "
+            f"預估剩餘時間: {rem_min:02d}分{rem_sec:02d}秒"
+        )
+        sys.stdout.flush() 
+
+    cap.release()
+    out.release()
+    cv2.destroyAllWindows()
+    print("\n" + "-" * 80)
+    print(f"處理完成！影片已儲存至：{output_path}")
+
+# ==========================================
+# 影片(輸入/輸出)路徑
+# ==========================================
+INPUT_VIDEO_PATH = r"D:\研究所題目\第一題\vidio\IMG_4995.MOV"
+OUTPUT_VIDEO_PATH = r"D:\研究所題目\第一題\vidio\output\IMG_4995.MOV"
+coin_detection(INPUT_VIDEO_PATH, OUTPUT_VIDEO_PATH)
 
 ```
